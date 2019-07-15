@@ -1,0 +1,85 @@
+1.  内核存放在CPU能访问的非易失性存储器——ROM或FLASH中
+     bootloader 放置硬件初始化的相关工作
+	实现硬件启动与软件启动的分离
+	在硬件初始化玩后，需要为软件启动（即操作系统内核的功能）做相应的准备
+		比如，加载内核镜像文件到内存
+	主要负责硬件启动相关工作，降低硬件相关代码和软件相关代码的耦合度，有助于移植
+2.  Bootloader
+    stage1
+	初始化硬件设备 （watchdog timer、中断、时钟、内存等）
+	此时内存RAM尚未初始化完成，stage1直接运行在存放bootloader的存储设备上(FLASH)
+	有些flash程序不可写，有些有存储空间限制
+	为加载stage2准备RAM空间，将stage2代码复制过去，并设置堆栈，最后跳转到stage2的入口函数
+    stage2
+	运行在RAM中，可使用C语言
+	初始化这一阶段需要使用的硬件设备以及其他功能
+	将内核镜像文件从存储器读到RAM中 和根文件系统
+	为内核设置启动参数
+	将CPU指令寄存器的内容设置为内核函数入口函数的地址
+	将控制权转交给操作系统
+    内核完成各类初始化工作，操作系统启动完成
+3.BIOS与GRUB
+	GRUB：GNU项目的一个多操作系统启动程序
+	stage1：BIOS加载MBR中的Grub代码后将CPU交给Grub，Grub一步一步加载自身代码，识别文件系统
+	stage2：Grub将文件系统中的内核镜像文件加载到内存中，并将控制权转交给操作系统内核
+4. gxemul中的启动流程
+	gxemul仿真器支持直接加载elf格式的内核
+	启动流程被简化为加载内核到内存，之后跳转到内核的入口。启动完毕
+5.Makefile 用于指导程序如何被构建
+	.PHONY 表明列在其后的规则不受修改时间的约束
+	一般在写Makefile时，习惯将第一个规则命名为all，也就是构建整个项目的意思。
+	如果调用make时没有指定目标，make会自动执行第一个目标。
+                斜杠代表这一行没有结束，下一行的内容和这一行是连在一起的。这种写法一般用于提高文件的可读性。可以把本该写在同一行的东西分布在多行中， 使得文件更容易被人类阅读。
+6.ELF——深入探究编译与链接
+ELF(Executable and Linkable Format) Unix常用的目标文件格式
+ELF文件是一种对可执行文件，目标文件和库使用的文件格式
+包含三种文件类型：可重定位(relocatable）文件（.o） 、可执行(executable)文件和共享对象(shared object）文件 后两种需要链接器对可重定位文件进行处理
+包含五个部分
+	1.ELF Header，包含程序的基本信息，比如体系结构和操作系统，同时也包含了Section Header Table和Program Header Table相对文件的偏移量(offset)
+	2.Program Header Table ,也称为Segment Table，主要包含程序中各个Segment的信息，需要在运行时刻使用
+	3.Section Header Table，包含各个Section的信息，需要在程序编译和链接的时候使用
+	4.Segments 记录了每一段数据（包括代码等内容）需要被载入到哪里，记录了用于指导应用程序加载的各类信息
+	5.Sections 记录了程序的代码段、数据段等各个段的内容，主要是连接器在连接的过程中需要使用
+需要在两种场合使用：
+	1.组成可重定位文件，参与可执行文件和可共享文件的链接
+	2.组成可执行文件或者可共享文件，在运行时为加载器提供信息
+readelf -l 查看各个segment信息
+	Offset代表该段（segment）的数据相对于ELF文件的偏移
+	VirtAddr代表该段最终需要被加载到内存的哪个位置
+	FileSiz代表该段的数据在文件中的长度
+	MemSiz代表该段的数据在内存中所应当占的大小
+                (MemSiz>=FileSiz)
+7.MIPS内存布局——寻找内核的正确位置
+	32位的MIPS CPU中，程序地址空间会被划分为4个大区域
+	1.User Space(kuseg)0x00000000-0x7FFFFFFF(2G) 用户模式下可用的地址，通过MMU映射到实际的物理地址上
+	2.Kernel Space Unmapped Cached(kseg0)0x80000000-0x9FFFFFFF(512MB) 将地址的高3位清零，转换为物理地址，通过cache访问
+	3.Kernel Space U你mapped Uncached(kseg1)0xA0000000-0xBFFFFFFF(512MB) 将高三位清零映射为物理地址，不通过cache进行存取
+	4.Kernel Space Mapped Cached(kseg2)0xC0000000-0xFFFFFFFF(1GB) 只能在内核态下使用并且需要MMU的转换
+	  需要通过MMU映射访问的地址得在建立虚拟内存机制后才能正常使用
+	  在载入内核时，只能选用不需要通过MMU的内存空间，因为此时尚未建立虚存机制
+	  kseg1不经过cache，一般用于访问外部设备
+	  内核只能放在kseg0
+8.Linker Script——控制加载地址
+	ELF section 使用section header table来描述各个section的组织，记录了在连接过程中所需要的必要信息
+		.text  保存可执行文件的操作命令
+		.data 保存已初始化的全局变量和静态变量
+		.bss   保存未初始化的全局变量和静态变量
+	如何通过lds文件控制各段被加载到的位置。
+                SECTIONS
+	{
+	    . = 0x10000;
+	    . text : {*(. text) }
+	    . = 0x8000000;
+	    . data : { *(. data) }
+	    . bss : { *(. bss) }
+	}
+                "."是一个特殊符号，用来做定位计数器，根据输出段的大小增长，开始时值为0，可用于设置接下来的section的起始地址
+	"*"是一个通配符，匹配所有的相应的段
+	
+	linker中程序入口的设置方法：
+		1.使用ld命令时，通过参数“-e”设置
+		2.在linker script中使用ENTRY（）指令指定了程序入口
+		3.如果定义start，则start就是程序入口
+		4.  .text 段的第一个字节
+		5. 地址0处
+9.MIPS汇编与C语言

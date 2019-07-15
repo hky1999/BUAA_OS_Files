@@ -1,0 +1,1 @@
+arm_control=0x200

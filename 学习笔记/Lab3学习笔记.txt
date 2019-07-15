@@ -1,0 +1,131 @@
+一、进程控制块(PCB)
+	系统为了管理进程设置的一个专门的数据结构，用它来记录进程的外部特征，描述进程的运动变化过程。
+	系统用PCB来控制与管理进程
+	是系统感知进程存在的唯一标志。进程与PCB一一对应。
+	struct Env {
+	struct Trapframe env_tf; // Saved registers
+		定义在include/trap.h
+		当进程因为时间片用光不再运行时，保存进程的上下文环境
+		当从用户模式切换到内核模式运行时，内核也会保存进程上下文
+		用户进程返回时从中恢复上下文
+	LIST_ENTRY(Env) env_link; // Free LIST_ENTRY
+		与env_free_list构造空闲进程链表
+		类似pp_link
+	u_int env_id; // Unique environment identifier
+		进程独一无二的标识符
+	u_int env_parent_id; // env_id of this env's parent
+		创建本进程的进程id
+	u_int env_status; // Status of the environment
+		ENV_FREE：该进程不活动，该进程控制块处于进程空闲链表中
+		ENV_NOT_RUNNALBE：该进程处于阻塞状态，等待一定的条件才可以变为就绪状态从而被CPU调度
+		ENV_RUNNALBE：该进程处于就绪状态，正在等待被调度（可以是正在运行的，也可能不在运行中）
+	Pde *env_pgdir; // Kernel virtual address of page dir
+		该进程页目录的虚拟地址
+	u_int env_cr3;
+		该进程页目录的物理地址
+	LIST_ENTRY(Env) env_sched_link;
+		构造就绪状态进程链表
+	u_int env_pri;	
+		保存该进程的优先级
+	 };
+二、进程的标识
+	生成一个新的进程id：
+	      u_int mkenvid(struct Env *e)
+		(++next_env_id<<(1+LOG2NENV) | idx
+	通过id找到对应的进程控制块
+	      envid2env(u_int envid, struct Env **penv, int checkperm)
+		e = &envs[ENVX(envid)];	#define ENVX(envid)     ((envid) & (NENV - 1))
+三、设置进程控制块
+      进程创建流程：
+	1.从env_free_list申请空闲PCB
+	2.手工初始化进程控制块
+	3.为新进程分配资源，为其的程序和数据以及用户栈分配必要的内存空间
+	4.将PCB从空闲链表里除名
+     env_setup_vm(struct Env *e)
+     env_alloc(struct Env **new, u_int parent_id)
+四、加载二进制镜像
+	为新进程的程序分配空间来容纳程序代码
+	正确加载一个ELF文件到内存——将ELF文件中所有需要加载的segment加载到对应的虚地址上即可
+	load_elf解析ELF文件,调用此函数可以获取ELF文件的各项信息
+五、创建进程
+	env_create()
+	env_create_priority()
+六、进程运行与切换
+	env_run()
+	进程运行使用的基本函数
+	一部分保存当前进程上下文（如果当前没有运行的进程就跳过这一步）
+	另一部分是要恢复要启动的进程的上下文，然后运行该进程
+	
+	进程上下文说来就是一个环境，相对于进程而言，就是进程执行时的环境，具体来说就是各个变量和数据，包括所有的寄存器变量、内存信息等
+
+	两种需要保存的状态：
+		进程本身的状态
+			env_id, env_parent_id, env_pgdir, env_cr3……
+		进程周围的环境状态
+			env_tf
+	进程本身的状态在进程切换的时候是不会变化的，会变化的也就是需要保存的是进程的环境信息
+	
+	进程运行到某个时刻，它的上下文——CPU寄存器，保存在TIMESTACK区域
+	
+	env_pop_tf 位于lib/env_asm.S
+七、异常的分发
+	异常分发代码：(start.S前面部分）
+		1.取得异常码，为区别异常的重要标志
+		2.以异常码作为索引去exception_handlers数组中找到对应的中断处理函数
+		3.跳转到对应的中断处理函数，响应异常，将异常交给对应的异常处理函数
+	Cause Register寄存器中保存着CPU中哪一些中断或者异常已经发生
+	bit2 bit6保存着异常码
+	bit2 bit15保存着哪一些中断发生了
+
+	.text.exec_vec3段通过链接器放到特定的位置(0x80000080)
+	这个地址存放的是异常处理程序的入口地址，一旦CPU发生异常，就自动跳转到0x80000080处，开始执行
+八、异常向量组
+	trap_init()
+	实现了对全局变量exception_handlers[32]数组初始化的工作，将相应的处理函数的地址填到对应数组项中
+	0号异常：handle_int  ——中断异常的处理函数
+	1号异常：handle_mod
+	2号异常：handle_tlb
+	3号异常：handle_tlb
+	8号异常：handle_sys
+九、时钟中断
+	与操作系统的时间片轮转算法有关
+	时间片轮转调度：每个进程被分配一个时间段，称作它的时间片，即该进程允许运行的时间。
+		         如过载时间片结束时进程还在运行，则进程将挂起，切换到另一个进程运行
+	CPU通过定时器产生的时钟中断来知晓一个进程的时间片结束
+	初始化时钟：kclock_init() -调用- set_timer()（位于kclock_asm.S)
+	1.将1写入0xb5000100，
+		0xb5000000是模拟器映射实时钟的位置
+		0x100偏移量表示设置实时钟中断的频率，1表示1秒钟中断1次，0表示关闭时钟
+		实时钟对于R3000来说绑定在4号中断，这段代码主要用来触发4号中断
+	2.实时钟中断产生，触发MIPS中断，从而MIPS将PC指向0x80000080
+		从而跳转到.text.exc_ver3代码段执行，通过它的分发，最终调用handle_init函数来处理实时钟中断
+	3.在handle_init判断CP0_CAUSE寄存器是不是对应的4号中断位引发的中断，若是则执行中断服务函数timer_irq
+	4.在timer_irq里直接跳转到sched_yield中执行，这个函数就是调度函数
+十、进程调度
+	时钟中断产生时，最终调用sched_yield函数来进行进程的调度（位于lib/sched.c)
+	时间片轮转算法
+	寻找就绪状态进程，用两个链表存储所有就绪状态进程
+	每当一个进程状态变为ENV_RUNNABLE，要将其插入第一个就绪状态进程链表
+	调用shced_yield函数时，先判断当前时间片是否用完
+	若用完将其插入另一个就绪状态进程链表
+	之后判断当前就绪状态进程链表是否为空，若为空，切换到另一个就绪状态进程链表
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+	
